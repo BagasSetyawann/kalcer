@@ -2,7 +2,10 @@
 // Supabase Edge Function: /blast
 // Mengirim pesan WhatsApp via Fonnte API
 // Mendukung:
-//   - POST /blast/h1      → Blasting ke semua PIC jadwal H-1
+//   - POST /blast/h1      → Blasting ke semua PIC jadwal H-1 (besok)
+//   - POST /blast/h2      → Blasting ke semua PIC jadwal H-2 (2 hari lagi)
+//   - POST /blast/h3      → Blasting ke semua PIC jadwal H-3 (3 hari lagi)
+//   - POST /blast/h7      → Blasting ke semua PIC jadwal H-7 (7 hari lagi)
 //   - POST /blast/{id}    → Kirim ke satu PIC berdasarkan event ID
 // Runtime: Deno (TypeScript)
 // ============================================================
@@ -18,60 +21,127 @@ const corsHeaders = {
 };
 
 // Helper: Normalisasi nomor telepon → format internasional (628xxx)
+// Menghapus semua karakter non-digit, lalu pastikan awalan 62
 function normalizePhone(phone: string): string {
   let cleaned = phone.replace(/\D/g, "");
-  if (cleaned.startsWith("0")) {
-    cleaned = "62" + cleaned.substring(1);
-  } else if (!cleaned.startsWith("62")) {
-    cleaned = "62" + cleaned;
+  if (cleaned.startsWith("62")) {
+    // Sudah benar, tidak perlu diubah
+    return cleaned;
+  } else if (cleaned.startsWith("0")) {
+    // Ganti 0 di depan dengan 62
+    return "62" + cleaned.substring(1);
+  } else {
+    // Tidak ada awalan sama sekali, tambahkan 62
+    return "62" + cleaned;
   }
-  return cleaned;
 }
 
-// Helper: Kirim pesan via Fonnte API
+// Helper: Dapatkan tanggal target YYYY-MM-DD dalam zona waktu WIB (UTC+7)
+// daysAhead: jumlah hari ke depan (1 = besok, 2 = lusa, dst.)
+function getTargetDateWIB(daysAhead: number): string {
+  const nowUTC = new Date();
+  const wibOffsetMs = 7 * 60 * 60 * 1000;
+  const nowWIB = new Date(nowUTC.getTime() + wibOffsetMs);
+  const target = new Date(nowWIB.getTime());
+  target.setDate(target.getDate() + daysAhead);
+  const year  = target.getUTCFullYear();
+  const month = String(target.getUTCMonth() + 1).padStart(2, "0");
+  const day   = String(target.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+// Helper: Kirim pesan via Fonnte API menggunakan JSON body
+// (lebih andal daripada FormData di lingkungan Deno Edge Function)
 async function sendViaFonnte(
   fonnteToken: string,
   phone: string,
   message: string
-): Promise<{ success: boolean; message: string }> {
+): Promise<{ success: boolean; message: string; detail?: unknown }> {
   const normalizedPhone = normalizePhone(phone);
 
-  const formData = new FormData();
-  formData.append("target", normalizedPhone);
-  formData.append("message", message);
-  formData.append("countryCode", "62");
+  console.log(`[Fonnte] Mengirim ke nomor: ${normalizedPhone}`);
 
-  const response = await fetch("https://api.fonnte.com/send", {
-    method: "POST",
-    headers: {
-      Authorization: fonnteToken,
-    },
-    body: formData,
-  });
+  // PERBAIKAN BUG #1: Gunakan JSON body, bukan FormData
+  // PERBAIKAN BUG #2: Hapus countryCode agar tidak terjadi double-prefix (628xxx + 62 = 62628xxx)
+  const payload = {
+    target: normalizedPhone,
+    message: message,
+    // countryCode SENGAJA DIHAPUS karena nomor sudah dinormalisasi ke format 62xxx
+  };
 
-  const result = await response.json();
-  console.log(`Fonnte response for ${normalizedPhone}:`, result);
-
-  if (result.status === true) {
-    return { success: true, message: `Pesan terkirim ke ${normalizedPhone}` };
-  } else {
+  let response: Response;
+  try {
+    response = await fetch("https://api.fonnte.com/send", {
+      method: "POST",
+      headers: {
+        "Authorization": fonnteToken,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (networkErr) {
+    console.error("[Fonnte] Network error:", networkErr);
     return {
       success: false,
-      message: result.reason || result.message || "Gagal mengirim pesan",
+      message: `Gagal terhubung ke Fonnte API: ${networkErr.message}`,
+    };
+  }
+
+  let result: Record<string, unknown>;
+  try {
+    result = await response.json();
+  } catch {
+    const rawText = await response.text().catch(() => "(tidak bisa dibaca)");
+    console.error("[Fonnte] Response bukan JSON:", rawText);
+    return {
+      success: false,
+      message: `Fonnte mengembalikan response tidak valid (HTTP ${response.status}): ${rawText}`,
+    };
+  }
+
+  console.log(`[Fonnte] Response untuk ${normalizedPhone}:`, JSON.stringify(result));
+
+  // Fonnte mengembalikan { status: true, ... } jika berhasil
+  if (result.status === true) {
+    return {
+      success: true,
+      message: `Pesan berhasil dikirim ke ${normalizedPhone}`,
+      detail: result,
+    };
+  } else {
+    // Tampilkan semua field error yang mungkin dikirim Fonnte
+    const errMsg =
+      (result.reason as string) ||
+      (result.message as string) ||
+      (result.error as string) ||
+      `HTTP ${response.status}: Pesan gagal dikirim`;
+    console.error(`[Fonnte] Gagal kirim ke ${normalizedPhone}:`, errMsg, result);
+    return {
+      success: false,
+      message: errMsg,
+      detail: result,
     };
   }
 }
 
 // Helper: Format pesan pengingat
-function buildReminderMessage(event: {
-  title: string;
-  date: string;
-  picName: string;
-}): string {
+// daysAhead: 1 = besok, 2+ = X hari lagi
+function buildReminderMessage(
+  event: { title: string; date: string; picName: string },
+  daysAhead = 1
+): string {
+  let timeDesc: string;
+  if (daysAhead === 1) {
+    timeDesc = "besok";
+  } else if (daysAhead === 7) {
+    timeDesc = "7 hari lagi (seminggu lagi)";
+  } else {
+    timeDesc = `${daysAhead} hari lagi`;
+  }
   return (
-    `Halo ${event.picName}, ini pengingat dari aplikasi KalRemind untuk kegiatan besok:\n\n` +
-    `*${event.title}*\n` +
-    `Tanggal: ${event.date}\n\n` +
+    `Halo ${event.picName}, ini pengingat dari aplikasi *KALCER* (Kalender Cerdas Reminder) untuk kegiatan *${timeDesc}*:\n\n` +
+    `📌 *${event.title}*\n` +
+    `📅 Tanggal: ${event.date}\n\n` +
     `Mohon balas pesan ini dengan kata *OK* atau *SIAP* untuk mengonfirmasi kehadiran/kesiapan Anda. Terima kasih! 🙏`
   );
 }
@@ -90,19 +160,35 @@ serve(async (req: Request) => {
   }
 
   try {
-    // Ambil Fonnte token dari header request atau dari body
-    const body = await req.json().catch(() => ({}));
-    const fonnteToken =
-      req.headers.get("x-fonnte-token") ||
-      body.fonnteToken ||
-      Deno.env.get("FONNTE_TOKEN") ||
-      "";
+    // PERBAIKAN BUG #3: Baca URL path SEBELUM mencoba parsing body,
+    // agar tidak ada konflik dengan body consumption
+    const url = new URL(req.url);
+    const pathParts = url.pathname.split("/").filter(Boolean);
+    const lastSegment = pathParts[pathParts.length - 1]; // "h1" atau ID angka
+
+    // Ambil Fonnte token dari header (prioritas) atau dari body JSON
+    // Header lebih diutamakan karena tidak mengkonsumsi body
+    const tokenFromHeader = req.headers.get("x-fonnte-token");
+
+    let fonnteToken = tokenFromHeader || Deno.env.get("FONNTE_TOKEN") || "";
+
+    // Hanya parse body jika token tidak ada di header (hindari double parsing)
+    let parsedBody: Record<string, unknown> = {};
+    if (!fonnteToken) {
+      try {
+        parsedBody = await req.json();
+        fonnteToken = (parsedBody.fonnteToken as string) || "";
+      } catch {
+        // Body mungkin kosong, tidak masalah
+      }
+    }
+
+    console.log(`[Blast] Path: ${url.pathname}, Segment: ${lastSegment}, Token ada: ${!!fonnteToken}`);
 
     if (!fonnteToken) {
       return new Response(
         JSON.stringify({
-          error:
-            "Token Fonnte tidak ditemukan. Masukkan token Fonnte di halaman Pengaturan aplikasi.",
+          error: "Token Fonnte tidak ditemukan. Masukkan token Fonnte di halaman Pengaturan aplikasi.",
         }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
@@ -113,23 +199,27 @@ serve(async (req: Request) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
     );
 
-    const url = new URL(req.url);
-    const pathParts = url.pathname.split("/").filter(Boolean);
-    const lastSegment = pathParts[pathParts.length - 1]; // "h1" atau ID angka
+    // ============================================================
+    // POST /blast/hN → Blasting semua jadwal H-N yang masih pending
+    // Contoh: /blast/h1, /blast/h2, /blast/h3, /blast/h7
+    // ============================================================
+    const hMatch = lastSegment.match(/^h(\d+)$/);
+    if (hMatch) {
+      const daysAhead = parseInt(hMatch[1], 10);
+      if (daysAhead < 1 || daysAhead > 30) {
+        return new Response(
+          JSON.stringify({ error: "Nilai H harus antara 1 dan 30. Contoh: /blast/h1, /blast/h7" }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
 
-    // ============================================================
-    // POST /blast/h1 → Blasting semua jadwal H-1 yang masih pending
-    // ============================================================
-    if (lastSegment === "h1") {
-      const tomorrow = new Date();
-      tomorrow.setDate(tomorrow.getDate() + 1);
-      // Format tanggal: YYYY-MM-DD
-      const tomorrowStr = tomorrow.toISOString().split("T")[0];
+      const targetDateStr = getTargetDateWIB(daysAhead);
+      console.log(`[Blast H-${daysAhead}] Mencari jadwal untuk tanggal: ${targetDateStr}`);
 
       const { data: targetEvents, error: fetchError } = await supabase
         .from("events")
         .select("*")
-        .eq("date", tomorrowStr)
+        .eq("date", targetDateStr)
         .eq("status", "pending");
 
       if (fetchError) throw fetchError;
@@ -139,21 +229,23 @@ serve(async (req: Request) => {
           JSON.stringify({
             success: true,
             sent: 0,
-            message: `Tidak ada jadwal H-1 (${tomorrowStr}) yang memerlukan pengingat.`,
+            daysAhead,
+            message: `Tidak ada jadwal H-${daysAhead} (${targetDateStr}) yang memerlukan pengingat.`,
           }),
           { headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
 
+      console.log(`[Blast H-${daysAhead}] Ditemukan ${targetEvents.length} jadwal untuk ${targetDateStr}`);
+
       const results = [];
       let successCount = 0;
 
       for (const event of targetEvents) {
-        const message = buildReminderMessage(event);
+        const message = buildReminderMessage(event, daysAhead);
         const result = await sendViaFonnte(fonnteToken, event.picPhone, message);
 
         if (result.success) {
-          // Update status ke 'reminded'
           await supabase
             .from("events")
             .update({ status: "reminded" })
@@ -166,11 +258,15 @@ serve(async (req: Request) => {
           title: event.title,
           picName: event.picName,
           picPhone: event.picPhone,
+          normalizedPhone: normalizePhone(event.picPhone),
           ...result,
         });
 
-        // Jeda 1 detik antar pesan untuk menghindari rate limiting Fonnte
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        // Jeda 60 detik (1 menit) antar pesan untuk menghindari deteksi bot WhatsApp
+        if (targetEvents.indexOf(event) < targetEvents.length - 1) {
+          console.log(`[Blast H-${daysAhead}] Menunggu 60 detik sebelum pesan berikutnya...`);
+          await new Promise((resolve) => setTimeout(resolve, 60000));
+        }
       }
 
       return new Response(
@@ -178,7 +274,8 @@ serve(async (req: Request) => {
           success: true,
           sent: successCount,
           total: targetEvents.length,
-          date: tomorrowStr,
+          daysAhead,
+          date: targetDateStr,
           results,
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -189,7 +286,7 @@ serve(async (req: Request) => {
     // POST /blast/{id} → Kirim ke satu PIC berdasarkan event ID
     // ============================================================
     const eventId = Number(lastSegment);
-    if (!isNaN(eventId)) {
+    if (!isNaN(eventId) && eventId > 0) {
       const { data: event, error: fetchError } = await supabase
         .from("events")
         .select("*")
@@ -212,6 +309,8 @@ serve(async (req: Request) => {
         );
       }
 
+      console.log(`[Blast Single] Mengirim ke event ID ${eventId}: ${event.title} → ${event.picPhone}`);
+
       const message = buildReminderMessage(event);
       const result = await sendViaFonnte(fonnteToken, event.picPhone, message);
 
@@ -224,7 +323,11 @@ serve(async (req: Request) => {
       }
 
       return new Response(
-        JSON.stringify({ ...result, event }),
+        JSON.stringify({
+          ...result,
+          normalizedPhone: normalizePhone(event.picPhone),
+          event,
+        }),
         {
           status: result.success ? 200 : 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -233,11 +336,11 @@ serve(async (req: Request) => {
     }
 
     return new Response(
-      JSON.stringify({ error: "Endpoint tidak valid. Gunakan /blast/h1 atau /blast/{id}" }),
+      JSON.stringify({ error: "Endpoint tidak valid. Gunakan /blast/h1, /blast/h2, /blast/h3, /blast/h7, atau /blast/{id}" }),
       { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err) {
-    console.error("Error di Edge Function /blast:", err);
+    console.error("[Blast] Error tidak terduga:", err);
     return new Response(JSON.stringify({ error: err.message }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },

@@ -1,9 +1,11 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Calendar as CalendarIcon, Clock, CheckCircle, X, Bell,
   Plus, LayoutGrid, List as ListIcon, Settings, RefreshCw,
-  Send, AlertCircle, Zap, Link, ExternalLink, Save, Eye, EyeOff
+  Send, AlertCircle, Zap, Link, ExternalLink, Save, Eye, EyeOff, LogOut,
+  Repeat, Upload, Download, FileSpreadsheet, ToggleLeft, ToggleRight, Trash2
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import { supabase, FUNCTIONS_URL } from './lib/supabase.js';
 
 const CATEGORIES = [
@@ -17,14 +19,15 @@ const CATEGORIES = [
 ];
 
 // Key penyimpanan token Fonnte di localStorage (tersimpan di browser admin)
-const FONNTE_TOKEN_KEY = 'kalremind_fonnte_token';
+const FONNTE_TOKEN_KEY = 'kalcer_fonnte_token';
 
-export default function App() {
+export default function App({ session }) {
   const [activeTab, setActiveTab]       = useState('dashboard');
   const [events, setEvents]             = useState([]);
   const [isModalOpen, setIsModalOpen]   = useState(false);
   const [isLoading, setIsLoading]       = useState(false);
-  const [blastResult, setBlastResult]   = useState(null); // Hasil blasting H-1
+  const [blastResults, setBlastResults] = useState({}); // Hasil blasting per key (h7, h3, h2, h1)
+  const [lastBlastKey, setLastBlastKey] = useState(null); // Key terakhir yang di-blast
 
   // Fonnte token management
   const [fonnteToken, setFonnteToken]   = useState(() => localStorage.getItem(FONNTE_TOKEN_KEY) || '');
@@ -42,6 +45,37 @@ export default function App() {
     title: '', date: '', category: 'kepeg', picName: '', picPhone: ''
   });
 
+  // ─── Import Excel state ───
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [importPreview, setImportPreview]         = useState([]);   // parsed rows
+
+  // ─── Upload Bukti state ───
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const [selectedUploadEvent, setSelectedUploadEvent] = useState(null);
+  const [uploadFile, setUploadFile] = useState(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [importError, setImportError]             = useState('');
+  const [isImporting, setIsImporting]             = useState(false);
+  const [isDragOver, setIsDragOver]               = useState(false);
+  const fileInputRef                              = useRef(null);
+
+  // ─── Recurring events state ───
+  const [recurringEvents, setRecurringEvents]       = useState([]);
+  const [isRecurringModalOpen, setIsRecurringModalOpen] = useState(false);
+  const [isGenerating, setIsGenerating]             = useState(false);
+  const [generateResult, setGenerateResult]         = useState(null);
+  const [recurringForm, setRecurringForm]           = useState({
+    title: '', day_of_month: 1, category: 'kepeg', picName: '', picPhone: ''
+  });
+
+  // ─── Import Rutin Excel state ───
+  const [isImportRecurringOpen, setIsImportRecurringOpen] = useState(false);
+  const [importRecurringPreview, setImportRecurringPreview] = useState([]);
+  const [importRecurringError, setImportRecurringError]   = useState('');
+  const [isImportingRecurring, setIsImportingRecurring]   = useState(false);
+  const [isDragOverRecurring, setIsDragOverRecurring]     = useState(false);
+  const fileInputRecurringRef                             = useRef(null);
+
   // ============================================================
   // DATA FETCHING via Supabase JS Client
   // ============================================================
@@ -58,9 +92,23 @@ export default function App() {
     }
   }, []);
 
+  const fetchRecurringEvents = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('recurring_events')
+        .select('*')
+        .order('day_of_month', { ascending: true });
+      if (error) throw error;
+      setRecurringEvents(data || []);
+    } catch (err) {
+      console.error('Gagal mengambil data rutin:', err.message);
+    }
+  }, []);
+
   // Load awal + realtime subscription
   useEffect(() => {
     fetchEvents();
+    fetchRecurringEvents();
     tokenInput === '' && setTokenInput(fonnteToken);
 
     // Supabase Realtime: Update UI otomatis ketika ada perubahan di DB
@@ -68,6 +116,9 @@ export default function App() {
       .channel('events-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, () => {
         fetchEvents();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'recurring_events' }, () => {
+        fetchRecurringEvents();
       })
       .subscribe();
 
@@ -84,6 +135,14 @@ export default function App() {
     setFonnteToken(trimmed);
     setTokenSaved(true);
     setTimeout(() => setTokenSaved(false), 3000);
+  };
+
+  // ============================================================
+  // AUTH
+  // ============================================================
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    // main.jsx akan mendeteksi session menjadi null dan tampilkan LoginPage
   };
 
   // Helper: panggil Edge Function dengan Fonnte token
@@ -123,6 +182,307 @@ export default function App() {
     }
   };
 
+  // ============================================================
+  // UPLOAD BUKTI
+  // ============================================================
+  const handleUploadEvidence = async (e) => {
+    e.preventDefault();
+    if (!uploadFile || !selectedUploadEvent) return;
+    
+    setIsUploading(true);
+    try {
+      const fileExt = uploadFile.name.split('.').pop();
+      const fileName = `${selectedUploadEvent.id}_${Date.now()}.${fileExt}`;
+      const filePath = `${fileName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from('evidence')
+        .upload(filePath, uploadFile);
+        
+      if (uploadError) throw uploadError;
+      
+      const { data: { publicUrl } } = supabase.storage
+        .from('evidence')
+        .getPublicUrl(filePath);
+
+      const { error: updateError } = await supabase
+        .from('events')
+        .update({ 
+          evidence_url: publicUrl,
+          status: 'confirmed'
+        })
+        .eq('id', selectedUploadEvent.id);
+        
+      if (updateError) throw updateError;
+      
+      setEvents(events.map(ev => 
+        ev.id === selectedUploadEvent.id 
+          ? { ...ev, evidence_url: publicUrl, status: 'confirmed' }
+          : ev
+      ));
+      
+      setIsUploadModalOpen(false);
+      setUploadFile(null);
+      setSelectedUploadEvent(null);
+      
+    } catch (err) {
+      console.error('Error uploading evidence:', err.message);
+      alert('Gagal mengunggah bukti: ' + err.message);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  // ============================================================
+  // IMPORT EXCEL
+  // ============================================================
+  const VALID_CATEGORIES = CATEGORIES.map(c => c.id);
+
+  const parseExcelFile = (file) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const data = new Uint8Array(e.target.result);
+          const workbook = XLSX.read(data, { type: 'array' });
+          const sheet = workbook.Sheets[workbook.SheetNames[0]];
+          const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+          // Skip header row
+          const parsed = rows.slice(1).map((row, i) => ({
+            rowNum: i + 2,
+            title:    String(row[0] || '').trim(),
+            date:     String(row[1] || '').trim(),
+            category: String(row[2] || '').trim().toLowerCase(),
+            picName:  String(row[3] || '').trim(),
+            picPhone: String(row[4] || '').trim(),
+          })).filter(r => r.title);
+          resolve(parsed);
+        } catch (err) {
+          reject(err);
+        }
+      };
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    });
+  };
+
+  const validateImportRow = (row) => {
+    const errors = [];
+    if (!row.title) errors.push('Nama Kegiatan kosong');
+    if (!row.date || !/^\d{4}-\d{2}-\d{2}$/.test(row.date)) errors.push('Format Tanggal harus YYYY-MM-DD');
+    if (!VALID_CATEGORIES.includes(row.category)) errors.push(`Kategori "${row.category}" tidak valid`);
+    if (!row.picName) errors.push('Nama PIC kosong');
+    if (!row.picPhone) errors.push('No WA PIC kosong');
+    return errors;
+  };
+
+  const handleFileChange = async (file) => {
+    if (!file) return;
+    setImportError('');
+    setImportPreview([]);
+    try {
+      const rows = await parseExcelFile(file);
+      if (rows.length === 0) { setImportError('File kosong atau tidak ada data di bawah header.'); return; }
+      const withValidation = rows.map(r => ({ ...r, errors: validateImportRow(r) }));
+      setImportPreview(withValidation);
+    } catch {
+      setImportError('Gagal membaca file. Pastikan file berformat .xlsx atau .csv.');
+    }
+  };
+
+  const handleImportSubmit = async () => {
+    const validRows = importPreview.filter(r => r.errors.length === 0);
+    if (validRows.length === 0) { alert('Tidak ada baris yang valid untuk diimpor.'); return; }
+    setIsImporting(true);
+    try {
+      const payload = validRows.map(r => ({
+        title: r.title, date: r.date, category: r.category,
+        picName: r.picName, picPhone: r.picPhone, status: 'pending'
+      }));
+      const { error } = await supabase.from('events').insert(payload);
+      if (error) throw error;
+      alert(`✅ Berhasil mengimpor ${validRows.length} kegiatan!`);
+      setIsImportModalOpen(false);
+      setImportPreview([]);
+      fetchEvents();
+    } catch (err) {
+      alert('Gagal mengimpor: ' + err.message);
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const downloadTemplate = () => {
+    const ws = XLSX.utils.aoa_to_sheet([
+      ['Nama Kegiatan', 'Tanggal (YYYY-MM-DD)', 'Kategori', 'Nama PIC', 'No WA PIC'],
+      ['Rapat Evaluasi Bulanan', '2026-09-10', 'kepeg', 'Ahmad Basuki', '08123456789'],
+      ['Rekonsiliasi Keuangan',  '2026-09-15', 'keu',   'Siti Rahayu',  '08987654321'],
+    ]);
+    ws['!cols'] = [{ wch: 30 }, { wch: 22 }, { wch: 14 }, { wch: 20 }, { wch: 18 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Events');
+    XLSX.writeFile(wb, 'template_kalcer.xlsx');
+  };
+
+  // ============================================================
+  // RECURRING EVENTS
+  // ============================================================
+  const handleAddRecurring = async (e) => {
+    e.preventDefault();
+    try {
+      const { error } = await supabase
+        .from('recurring_events')
+        .insert([{ ...recurringForm, is_active: true }]);
+      if (error) throw error;
+      setIsRecurringModalOpen(false);
+      setRecurringForm({ title: '', day_of_month: 1, category: 'kepeg', picName: '', picPhone: '' });
+      fetchRecurringEvents();
+    } catch (err) {
+      alert('Gagal menambah event rutin: ' + err.message);
+    }
+  };
+
+  // ============================================================
+  // IMPORT EXCEL RUTIN
+  // ============================================================
+  const validateRecurringRow = (row) => {
+    const errors = [];
+    if (!row.title) errors.push('Nama Kegiatan kosong');
+    const d = parseInt(row.day_of_month);
+    if (isNaN(d) || d < 1 || d > 31) errors.push('Tanggal harus angka 1-31');
+    if (!VALID_CATEGORIES.includes(row.category)) errors.push(`Kategori "${row.category}" tidak valid`);
+    if (!row.picName) errors.push('Nama PIC kosong');
+    if (!row.picPhone) errors.push('No WA PIC kosong');
+    return errors;
+  };
+
+  const handleRecurringFileChange = async (file) => {
+    if (!file) return;
+    setImportRecurringError('');
+    setImportRecurringPreview([]);
+    try {
+      const rows = await parseExcelFile(file);
+      if (rows.length === 0) { setImportRecurringError('File kosong atau tidak ada data di bawah header.'); return; }
+      // Kolom: Nama Kegiatan | Tanggal (1-31) | Kategori | Nama PIC | No WA PIC
+      const parsed = rows.map(r => ({
+        ...r,
+        day_of_month: r.date, // kolom ke-2 di template rutin = tanggal 1-31
+        date: undefined,
+      }));
+      const withValidation = parsed.map(r => ({ ...r, errors: validateRecurringRow(r) }));
+      setImportRecurringPreview(withValidation);
+    } catch {
+      setImportRecurringError('Gagal membaca file. Pastikan file berformat .xlsx atau .csv.');
+    }
+  };
+
+  const handleImportRecurringSubmit = async () => {
+    const validRows = importRecurringPreview.filter(r => r.errors.length === 0);
+    if (validRows.length === 0) { alert('Tidak ada baris yang valid untuk diimpor.'); return; }
+    setIsImportingRecurring(true);
+    try {
+      const payload = validRows.map(r => ({
+        title: r.title,
+        day_of_month: parseInt(r.day_of_month),
+        category: r.category,
+        picName: r.picName,
+        picPhone: r.picPhone,
+        is_active: true,
+      }));
+      const { error } = await supabase.from('recurring_events').insert(payload);
+      if (error) throw error;
+      alert(`✅ Berhasil mengimpor ${validRows.length} template rutin!`);
+      setIsImportRecurringOpen(false);
+      setImportRecurringPreview([]);
+      fetchRecurringEvents();
+    } catch (err) {
+      alert('Gagal mengimpor: ' + err.message);
+    } finally {
+      setIsImportingRecurring(false);
+    }
+  };
+
+  const downloadRecurringTemplate = () => {
+    const ws = XLSX.utils.aoa_to_sheet([
+      ['Nama Kegiatan', 'Tanggal (1-31)', 'Kategori', 'Nama PIC', 'No WA PIC'],
+      ['Rekonsiliasi Keuangan', 5, 'keu', 'Siti Rahayu', '08987654321'],
+      ['Rapat Evaluasi Bulanan', 10, 'kepeg', 'Ahmad Basuki', '08123456789'],
+      ['Laporan SPIDER', 15, 'spider', 'Budi Santoso', '08111222333'],
+    ]);
+    ws['!cols'] = [{ wch: 30 }, { wch: 16 }, { wch: 14 }, { wch: 20 }, { wch: 18 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Rutin');
+    XLSX.writeFile(wb, 'template_kalcer_rutin.xlsx');
+  };
+
+  const handleDeleteRecurring = async (id) => {
+    if (!confirm('Hapus template event rutin ini?')) return;
+    try {
+      const { error } = await supabase.from('recurring_events').delete().eq('id', id);
+      if (error) throw error;
+      setRecurringEvents(prev => prev.filter(r => r.id !== id));
+    } catch (err) {
+      alert('Gagal menghapus: ' + err.message);
+    }
+  };
+
+  const handleToggleRecurring = async (id, currentActive) => {
+    try {
+      const { error } = await supabase
+        .from('recurring_events')
+        .update({ is_active: !currentActive })
+        .eq('id', id);
+      if (error) throw error;
+      setRecurringEvents(prev => prev.map(r => r.id === id ? { ...r, is_active: !currentActive } : r));
+    } catch (err) {
+      alert('Gagal mengubah status: ' + err.message);
+    }
+  };
+
+  const handleGenerateMonth = async () => {
+    const activeTemplates = recurringEvents.filter(r => r.is_active);
+    if (activeTemplates.length === 0) { alert('Tidak ada template rutin yang aktif.'); return; }
+    setIsGenerating(true);
+    setGenerateResult(null);
+    try {
+      const now = new Date();
+      const year = now.getFullYear();
+      const month = now.getMonth(); // 0-indexed
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+      const toInsert = [];
+      const skipped = [];
+
+      for (const tmpl of activeTemplates) {
+        const day = Math.min(tmpl.day_of_month, daysInMonth);
+        const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        // Cek apakah sudah ada event dengan judul & tanggal yang sama
+        const exists = events.some(e => e.title === tmpl.title && e.date === dateStr);
+        if (exists) {
+          skipped.push(tmpl.title);
+        } else {
+          toInsert.push({
+            title: tmpl.title, date: dateStr,
+            category: tmpl.category, picName: tmpl.picName,
+            picPhone: tmpl.picPhone, status: 'pending'
+          });
+        }
+      }
+
+      if (toInsert.length > 0) {
+        const { error } = await supabase.from('events').insert(toInsert);
+        if (error) throw error;
+        fetchEvents();
+      }
+
+      setGenerateResult({ inserted: toInsert.length, skipped: skipped.length, skippedNames: skipped });
+    } catch (err) {
+      alert('Gagal generate: ' + err.message);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
   const handleDeleteEvent = async (id) => {
     if (!confirm('Apakah Anda yakin ingin menghapus jadwal kegiatan ini?')) return;
     try {
@@ -157,28 +517,36 @@ export default function App() {
   };
 
   // ============================================================
-  // BLASTING H-1 — via Edge Function /blast/h1
+  // BLASTING H-N — via Edge Function /blast/hN
   // ============================================================
-  const handleBlastH1 = async () => {
+  const BLAST_OPTIONS = [
+    { key: 'h7', days: 7,  label: 'H-7', desc: '7 hari lagi',  color: 'purple' },
+    { key: 'h3', days: 3,  label: 'H-3', desc: '3 hari lagi',  color: 'blue'   },
+    { key: 'h2', days: 2,  label: 'H-2', desc: '2 hari lagi',  color: 'orange' },
+    { key: 'h1', days: 1,  label: 'H-1', desc: 'besok',        color: 'green'  },
+  ];
+
+  const handleBlast = async (option) => {
     if (!fonnteToken) {
       alert('Token Fonnte belum diisi! Silakan masuk ke tab Pengaturan terlebih dahulu.');
       setActiveTab('settings');
       return;
     }
-    setIsLoading(true);
-    setBlastResult(null);
+    setIsLoading(option.key);
+    setLastBlastKey(option.key);
     try {
-      const res = await callBlastFunction('/blast/h1');
+      const res = await callBlastFunction(`/blast/${option.key}`);
       if (!res) return;
       const data = await res.json();
-      setBlastResult(data);
+      setBlastResults(prev => ({ ...prev, [option.key]: data }));
       fetchEvents();
     } catch (err) {
-      setBlastResult({ error: err.message });
+      setBlastResults(prev => ({ ...prev, [option.key]: { error: err.message } }));
     } finally {
-      setIsLoading(false);
+      setIsLoading(null);
     }
   };
+
 
   // ============================================================
   // KALENDER HELPERS
@@ -198,10 +566,10 @@ export default function App() {
   // ============================================================
   // RENDER HELPERS
   // ============================================================
-  const NavButton = ({ id, icon: Icon, label }) => (
+  const NavButton = ({ id, icon: Icon, label, badge }) => (
     <button
       onClick={() => setActiveTab(id)}
-      className={`flex items-center space-x-2 px-4 py-2 rounded-full text-sm transition-all duration-200 ${
+      className={`relative flex items-center space-x-2 px-4 py-2 rounded-full text-sm transition-all duration-200 ${
         activeTab === id
           ? 'bg-black text-white font-medium shadow-md'
           : 'text-gray-500 hover:text-black hover:bg-gray-100'
@@ -209,6 +577,11 @@ export default function App() {
     >
       <Icon className="w-4 h-4" />
       <span>{label}</span>
+      {badge > 0 && (
+        <span className={`ml-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+          activeTab === id ? 'bg-white text-black' : 'bg-black text-white'
+        }`}>{badge}</span>
+      )}
     </button>
   );
 
@@ -231,24 +604,49 @@ export default function App() {
             <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center">
               <Bell className="w-4 h-4 text-white" />
             </div>
-            <h1 className="text-lg font-semibold tracking-tight">KalRemind</h1>
+            <h1 className="text-lg font-semibold tracking-tight">KALCER</h1>
           </div>
 
           <nav className="hidden md:flex items-center space-x-1">
-            <NavButton id="dashboard" icon={LayoutGrid}   label="Overview" />
-            <NavButton id="calendar"  icon={CalendarIcon} label="Calendar" />
-            <NavButton id="list"      icon={ListIcon}     label="Schedules" />
-            <NavButton id="blast"     icon={Zap}          label="Blasting" />
-            <NavButton id="settings"  icon={Settings}     label="Pengaturan" />
+            <NavButton id="dashboard"  icon={LayoutGrid}   label="Overview" />
+            <NavButton id="calendar"   icon={CalendarIcon} label="Calendar" />
+            <NavButton id="list"       icon={ListIcon}     label="Schedules" />
+            <NavButton id="recurring"  icon={Repeat}       label="Rutin" badge={recurringEvents.filter(r => r.is_active).length} />
+            <NavButton id="blast"      icon={Zap}          label="Blasting" />
+            <NavButton id="settings"   icon={Settings}     label="Pengaturan" />
           </nav>
 
-          <button
-            onClick={() => setIsModalOpen(true)}
-            className="flex items-center space-x-2 bg-black hover:bg-gray-800 text-white px-5 py-2 rounded-full text-sm font-medium transition-all shadow-sm hover:shadow active:scale-95"
-          >
-            <Plus className="w-4 h-4" />
-            <span>New Event</span>
-          </button>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => { setImportPreview([]); setImportError(''); setIsImportModalOpen(true); }}
+              title="Import dari Excel"
+              className="flex items-center space-x-2 border border-gray-200 hover:border-gray-400 text-gray-600 hover:text-black px-4 py-2 rounded-full text-sm font-medium transition-all hover:shadow-sm active:scale-95"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span className="hidden lg:inline">Import Excel</span>
+            </button>
+            <button
+              onClick={() => setIsModalOpen(true)}
+              className="flex items-center space-x-2 bg-black hover:bg-gray-800 text-white px-5 py-2 rounded-full text-sm font-medium transition-all shadow-sm hover:shadow active:scale-95"
+            >
+              <Plus className="w-4 h-4" />
+              <span>New Event</span>
+            </button>
+          </div>
+
+          {/* User info + logout */}
+          <div className="hidden md:flex items-center space-x-3 ml-3 pl-3 border-l border-gray-200">
+            <span className="text-xs text-gray-400 max-w-[140px] truncate" title={session?.user?.email}>
+              {session?.user?.email}
+            </span>
+            <button
+              onClick={handleLogout}
+              title="Keluar"
+              className="p-2 rounded-full text-gray-400 hover:text-red-600 hover:bg-red-50 transition-all"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </header>
 
@@ -449,8 +847,13 @@ export default function App() {
                             <div className="text-sm text-gray-900">{event.picName}</div>
                             <div className="text-xs text-gray-500 mt-0.5">{event.picPhone}</div>
                           </td>
-                          <td className="px-6 py-4 whitespace-nowrap">
+                          <td className="px-6 py-4 whitespace-nowrap flex flex-col items-start gap-1">
                             <StatusBadge status={event.status} />
+                            {event.evidence_url && (
+                              <a href={event.evidence_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-1 rounded-md hover:bg-blue-100 transition-colors">
+                                <ExternalLink className="w-3 h-3 mr-1" /> Lihat Bukti
+                              </a>
+                            )}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
                             <button
@@ -467,6 +870,17 @@ export default function App() {
                             >
                               <Send className="w-3.5 h-3.5 mr-1" />
                               Kirim WA
+                            </button>
+                            <button
+                              onClick={() => {
+                                setSelectedUploadEvent(event);
+                                setIsUploadModalOpen(true);
+                              }}
+                              title="Upload Bukti Tindak Lanjut"
+                              className="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-medium border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-all active:scale-95"
+                            >
+                              <Upload className="w-3.5 h-3.5 mr-1" />
+                              Bukti
                             </button>
                             <button
                               onClick={() => handleDeleteEvent(event.id)}
@@ -487,94 +901,272 @@ export default function App() {
         )}
 
         {/* ══════════════════════════════
+            RECURRING TAB
+        ══════════════════════════════ */}
+        {activeTab === 'recurring' && (
+          <div className="space-y-6 animate-in fade-in duration-500">
+
+            {/* Header bar */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-semibold text-gray-900">Event Rutin Bulanan</h2>
+                <p className="text-sm text-gray-500 mt-1">Template kegiatan yang berulang setiap bulan pada tanggal yang sama.</p>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleGenerateMonth}
+                  disabled={isGenerating}
+                  className="flex items-center space-x-2 border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 px-5 py-2.5 rounded-full text-sm font-medium transition-all active:scale-95 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isGenerating ? 'animate-spin' : ''}`} />
+                  <span>{isGenerating ? 'Memproses...' : 'Generate Bulan Ini'}</span>
+                </button>
+                <button
+                  onClick={() => { setImportRecurringPreview([]); setImportRecurringError(''); setIsImportRecurringOpen(true); }}
+                  className="flex items-center space-x-2 border border-violet-200 bg-violet-50 hover:bg-violet-100 text-violet-700 px-4 py-2.5 rounded-full text-sm font-medium transition-all active:scale-95"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span className="hidden sm:inline">Import Excel</span>
+                </button>
+                <button
+                  onClick={() => setIsRecurringModalOpen(true)}
+                  className="flex items-center space-x-2 bg-black hover:bg-gray-800 text-white px-5 py-2.5 rounded-full text-sm font-medium transition-all shadow-sm hover:shadow active:scale-95"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Tambah Rutin</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Generate result banner */}
+            {generateResult && (
+              <div className={`flex items-start space-x-3 rounded-2xl p-5 border ${
+                generateResult.inserted > 0
+                  ? 'bg-emerald-50 border-emerald-200'
+                  : 'bg-amber-50 border-amber-200'
+              }`}>
+                <CheckCircle className={`w-5 h-5 mt-0.5 shrink-0 ${generateResult.inserted > 0 ? 'text-emerald-600' : 'text-amber-500'}`} />
+                <div className="text-sm">
+                  <p className="font-semibold">
+                    {generateResult.inserted > 0
+                      ? `${generateResult.inserted} event berhasil dibuat untuk bulan ini!`
+                      : 'Semua event rutin sudah ada untuk bulan ini.'}
+                  </p>
+                  {generateResult.skipped > 0 && (
+                    <p className="text-gray-500 mt-1">{generateResult.skipped} event dilewati (sudah ada): {generateResult.skippedNames.join(', ')}</p>
+                  )}
+                </div>
+                <button onClick={() => setGenerateResult(null)} className="ml-auto text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+              </div>
+            )}
+
+            {/* List recurring events */}
+            <div className="bg-white rounded-3xl border border-gray-100 shadow-sm overflow-hidden">
+              {recurringEvents.length === 0 ? (
+                <div className="p-16 text-center">
+                  <Repeat className="w-12 h-12 text-gray-200 mx-auto mb-4" />
+                  <p className="text-sm text-gray-400 font-medium">Belum ada template event rutin.</p>
+                  <p className="text-xs text-gray-300 mt-1">Klik "Tambah Rutin" untuk membuat template.</p>
+                </div>
+              ) : (
+                <div className="divide-y divide-gray-50">
+                  {recurringEvents.map((rec) => {
+                    const cat = CATEGORIES.find(c => c.id === rec.category) || CATEGORIES[0];
+                    return (
+                      <div key={rec.id} className={`flex items-center justify-between p-5 transition-colors ${
+                        rec.is_active ? 'hover:bg-gray-50/50' : 'opacity-50 bg-gray-50/30'
+                      }`}>
+                        <div className="flex items-center space-x-4">
+                          <div className={`w-10 h-10 rounded-2xl flex flex-col items-center justify-center text-white shrink-0 ${
+                            rec.is_active ? cat.color : 'bg-gray-300'
+                          }`}>
+                            <span className="text-[10px] font-medium leading-none">Tgl</span>
+                            <span className="text-lg font-bold leading-none">{rec.day_of_month}</span>
+                          </div>
+                          <div>
+                            <h4 className="font-medium text-gray-900">{rec.title}</h4>
+                            <p className="text-sm text-gray-500 mt-0.5">
+                              <span className={`inline-flex items-center space-x-1 ${cat.text} mr-3`}>
+                                <span className={`w-1.5 h-1.5 rounded-full ${cat.dot}`} />
+                                <span>{cat.name}</span>
+                              </span>
+                              {rec.picName} · {rec.picPhone}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                          <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${
+                            rec.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-400'
+                          }`}>{rec.is_active ? 'Aktif' : 'Nonaktif'}</span>
+                          <button
+                            onClick={() => handleToggleRecurring(rec.id, rec.is_active)}
+                            title={rec.is_active ? 'Nonaktifkan' : 'Aktifkan'}
+                            className="p-2 rounded-full text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+                          >
+                            {rec.is_active
+                              ? <ToggleRight className="w-5 h-5 text-emerald-500" />
+                              : <ToggleLeft className="w-5 h-5" />}
+                          </button>
+                          <button
+                            onClick={() => handleDeleteRecurring(rec.id)}
+                            title="Hapus template"
+                            className="p-2 rounded-full text-gray-300 hover:text-red-500 hover:bg-red-50 transition-colors"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Info box */}
+            <div className="bg-blue-50 border border-blue-100 rounded-2xl p-5 text-sm text-blue-700">
+              <p className="font-semibold mb-1">💡 Cara kerja Generate Bulan Ini</p>
+              <ol className="list-decimal list-inside space-y-1 text-blue-600">
+                <li>Sistem membaca semua template rutin yang berstatus <strong>Aktif</strong>.</li>
+                <li>Untuk setiap template, sistem menghitung tanggal di bulan berjalan (misal: tgl 5 → 2026-08-05).</li>
+                <li>Jika event dengan judul & tanggal yang sama belum ada, event baru dibuat dengan status <em>Terjadwal</em>.</li>
+                <li>Klik tombol ini sekali di awal setiap bulan, atau kapanpun Anda butuhkan.</li>
+              </ol>
+            </div>
+          </div>
+        )}
+
+        {/* ══════════════════════════════
             BLASTING TAB
         ══════════════════════════════ */}
         {activeTab === 'blast' && (
           <div className="space-y-6 animate-in fade-in duration-500">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
-              {/* Panel Blasting H-1 */}
-              <div className="bg-white p-8 rounded-3xl border border-gray-100 shadow-sm flex flex-col">
-                <div className="flex items-center space-x-3 mb-2">
-                  <div className="w-10 h-10 bg-green-50 border border-green-200 rounded-xl flex items-center justify-center">
-                    <Zap className="w-5 h-5 text-green-600" />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-semibold text-gray-900">Blasting H-1</h3>
-                    <p className="text-xs text-gray-400">Kirim pengingat massal ke semua PIC yang jadwalnya besok</p>
-                  </div>
-                </div>
-
-                <div className="mt-6 p-4 bg-gray-50 rounded-2xl border border-gray-100">
-                  <p className="text-xs text-gray-500 font-medium uppercase tracking-wider mb-3">Jadwal H-1 (besok)</p>
-                  {(() => {
-                    const tomorrow = new Date();
-                    tomorrow.setDate(tomorrow.getDate() + 1);
-                    const tomorrowStr = tomorrow.toISOString().split('T')[0];
-                    const h1Events = events.filter(e => e.date === tomorrowStr && e.status === 'pending');
-                    if (h1Events.length === 0) return (
-                      <p className="text-sm text-gray-400 italic">Tidak ada jadwal H-1 yang pending untuk besok ({tomorrowStr}).</p>
-                    );
-                    return h1Events.map(e => {
-                      const cat = CATEGORIES.find(c => c.id === e.category) || CATEGORIES[0];
-                      return (
-                        <div key={e.id} className="flex items-center space-x-2 py-1.5">
-                          <span className={`w-2 h-2 rounded-full ${cat.dot}`} />
-                          <span className="text-sm text-gray-700 font-medium">{e.title}</span>
-                          <span className="text-xs text-gray-400">— {e.picName}</span>
-                        </div>
-                      );
-                    });
-                  })()}
-                </div>
-
-                <button
-                  onClick={handleBlastH1}
-                  disabled={isLoading || !fonnteToken}
-                  className={`mt-6 w-full py-3.5 rounded-2xl text-sm font-semibold transition-all active:scale-95 flex items-center justify-center space-x-2 ${
-                    !fonnteToken
-                      ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                      : isLoading
-                      ? 'bg-green-100 text-green-500 cursor-not-allowed'
-                      : 'bg-green-600 hover:bg-green-500 text-white shadow-lg shadow-green-200'
-                  }`}
-                >
-                  {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-                  <span>{isLoading ? 'Mengirim...' : 'BLASTING H-1 SEKARANG'}</span>
-                </button>
-
-                {!fonnteToken && (
-                  <p className="mt-3 text-xs text-center text-amber-600">
-                    Token Fonnte belum diisi.{' '}
-                    <button onClick={() => setActiveTab('settings')} className="underline font-medium">Buka Pengaturan →</button>
+            {!fonnteToken && (
+              <div className="flex items-start space-x-3 bg-amber-50 border border-amber-200 rounded-2xl p-5">
+                <AlertCircle className="w-5 h-5 text-amber-500 mt-0.5 shrink-0" />
+                <div>
+                  <p className="text-sm font-semibold text-amber-800">Token Fonnte Belum Diisi</p>
+                  <p className="text-xs text-amber-700 mt-1">
+                    Untuk mengaktifkan blasting, masukkan Token Fonnte di tab{' '}
+                    <button onClick={() => setActiveTab('settings')} className="underline font-medium">Pengaturan →</button>
                   </p>
-                )}
+                </div>
               </div>
+            )}
 
-              {/* Panel Hasil Blasting */}
-              <div className="bg-[#0D1117] rounded-3xl overflow-hidden border border-gray-800 flex flex-col min-h-[400px]">
-                <div className="bg-[#161B22] px-6 py-4 border-b border-gray-800 flex items-center space-x-3">
+            {/* Grid 4 Kartu Blasting */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+              {BLAST_OPTIONS.map((option) => {
+                const targetDate = (() => {
+                  const d = new Date();
+                  d.setDate(d.getDate() + option.days);
+                  return d.toISOString().split('T')[0];
+                })();
+                const pendingEvents = events.filter(e => e.date === targetDate && e.status === 'pending');
+                const isThisLoading = isLoading === option.key;
+
+                const colorMap = {
+                  purple: { bg: 'bg-purple-50', border: 'border-purple-200', icon: 'text-purple-600', btn: 'bg-purple-600 hover:bg-purple-500 shadow-purple-200', dot: 'bg-purple-500', badge: 'bg-purple-100 text-purple-700' },
+                  blue:   { bg: 'bg-blue-50',   border: 'border-blue-200',   icon: 'text-blue-600',   btn: 'bg-blue-600 hover:bg-blue-500 shadow-blue-200',     dot: 'bg-blue-500',   badge: 'bg-blue-100 text-blue-700'   },
+                  orange: { bg: 'bg-orange-50', border: 'border-orange-200', icon: 'text-orange-600', btn: 'bg-orange-600 hover:bg-orange-500 shadow-orange-200', dot: 'bg-orange-500', badge: 'bg-orange-100 text-orange-700' },
+                  green:  { bg: 'bg-green-50',  border: 'border-green-200',  icon: 'text-green-600',  btn: 'bg-green-600 hover:bg-green-500 shadow-green-200',   dot: 'bg-green-500',  badge: 'bg-green-100 text-green-700'  },
+                };
+                const c = colorMap[option.color];
+
+                return (
+                  <div key={option.key} className="bg-white rounded-3xl border border-gray-100 shadow-sm flex flex-col overflow-hidden">
+                    {/* Header kartu */}
+                    <div className={`flex items-center justify-between px-5 py-4 ${c.bg} border-b ${c.border}`}>
+                      <div className="flex items-center space-x-2">
+                        <div className={`w-8 h-8 rounded-xl ${c.bg} border ${c.border} flex items-center justify-center`}>
+                          <Zap className={`w-4 h-4 ${c.icon}`} />
+                        </div>
+                        <div>
+                          <p className="font-bold text-gray-900 text-sm">{option.label}</p>
+                          <p className="text-xs text-gray-500">{option.desc}</p>
+                        </div>
+                      </div>
+                      <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${c.badge}`}>
+                        {pendingEvents.length} pending
+                      </span>
+                    </div>
+
+                    {/* Daftar event preview */}
+                    <div className="flex-1 p-4 space-y-1.5 min-h-[120px]">
+                      {pendingEvents.length === 0 ? (
+                        <p className="text-xs text-gray-400 italic text-center pt-6">
+                          Tidak ada jadwal pending<br />
+                          <span className="font-mono text-[10px]">{targetDate}</span>
+                        </p>
+                      ) : (
+                        pendingEvents.map(e => {
+                          const cat = CATEGORIES.find(c => c.id === e.category) || CATEGORIES[0];
+                          return (
+                            <div key={e.id} className="flex items-center space-x-2 py-1">
+                              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${cat.dot}`} />
+                              <span className="text-xs text-gray-700 truncate font-medium">{e.title}</span>
+                              <span className="text-[10px] text-gray-400 shrink-0">— {e.picName}</span>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+
+                    {/* Tombol blast */}
+                    <div className="px-4 pb-4">
+                      <button
+                        onClick={() => handleBlast(option)}
+                        disabled={!!isLoading || !fonnteToken}
+                        className={`w-full py-2.5 rounded-xl text-xs font-semibold transition-all active:scale-95 flex items-center justify-center space-x-1.5 shadow-lg ${
+                          !fonnteToken
+                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed shadow-none'
+                            : isThisLoading
+                            ? 'bg-gray-100 text-gray-500 cursor-not-allowed shadow-none'
+                            : `${c.btn} text-white`
+                        }`}
+                      >
+                        {isThisLoading
+                          ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /><span>Mengirim...</span></>
+                          : <><Zap className="w-3.5 h-3.5" /><span>BLAST {option.label}</span></>}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Console Hasil Blasting */}
+            <div className="bg-[#0D1117] rounded-3xl overflow-hidden border border-gray-800">
+              <div className="bg-[#161B22] px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+                <div className="flex items-center space-x-3">
                   <Send className="w-4 h-4 text-gray-400" />
                   <h3 className="text-gray-200 font-mono text-sm tracking-wide">BLAST_RESULT_CONSOLE</h3>
                 </div>
-                <div className="flex-1 p-6 font-mono text-xs text-gray-400 overflow-y-auto space-y-2">
-                  {!blastResult ? (
-                    <div className="flex flex-col items-center justify-center h-full space-y-2 opacity-40">
-                      <Zap className="w-8 h-8" />
-                      <p>Tekan tombol "BLASTING H-1 SEKARANG" untuk melihat hasilnya di sini.</p>
-                    </div>
-                  ) : blastResult.error ? (
+                {lastBlastKey && blastResults[lastBlastKey] && (
+                  <span className="text-xs font-mono text-gray-500">last: /{lastBlastKey}</span>
+                )}
+              </div>
+              <div className="p-6 font-mono text-xs text-gray-400 min-h-[200px] max-h-[340px] overflow-y-auto space-y-2">
+                {!lastBlastKey || !blastResults[lastBlastKey] ? (
+                  <div className="flex flex-col items-center justify-center h-40 space-y-2 opacity-40">
+                    <Zap className="w-8 h-8" />
+                    <p>Tekan salah satu tombol BLAST di atas untuk melihat hasilnya di sini.</p>
+                  </div>
+                ) : (() => {
+                  const result = blastResults[lastBlastKey];
+                  if (result.error) return (
                     <div className="text-red-400 space-y-1">
                       <p className="text-red-500 font-semibold">● ERROR</p>
-                      <p>{blastResult.error}</p>
+                      <p>{result.error}</p>
                     </div>
-                  ) : (
+                  );
+                  return (
                     <div className="space-y-3">
                       <div className="text-green-400 font-semibold">
-                        ● Blasting selesai: {blastResult.sent}/{blastResult.total} pesan terkirim untuk tanggal {blastResult.date}
+                        ● Blasting H-{result.daysAhead || lastBlastKey?.replace('h','')}: {result.sent}/{result.total} pesan terkirim untuk {result.date}
                       </div>
-                      {blastResult.message && <p className="text-gray-500">{blastResult.message}</p>}
-                      {blastResult.results?.map((r, i) => (
+                      {result.message && <p className="text-gray-500">{result.message}</p>}
+                      {result.results?.map((r, i) => (
                         <div key={i} className={`flex items-start space-x-2 ${r.success ? 'text-gray-300' : 'text-red-400'}`}>
                           <span>{r.success ? '✅' : '❌'}</span>
                           <div>
@@ -585,12 +1177,13 @@ export default function App() {
                         </div>
                       ))}
                     </div>
-                  )}
-                </div>
+                  );
+                })()}
               </div>
             </div>
           </div>
         )}
+
 
         {/* ══════════════════════════════
             SETTINGS TAB
@@ -752,6 +1345,436 @@ export default function App() {
               <div className="pt-8 flex justify-end space-x-3">
                 <button type="button" onClick={() => setIsModalOpen(false)} className="px-6 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-full transition-colors">Batal</button>
                 <button type="submit" className="px-6 py-2.5 bg-black hover:bg-gray-800 text-white text-sm font-medium rounded-full transition-colors shadow-sm">Simpan Jadwal</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Modal Import Excel ─── */}
+      {isImportModalOpen && (
+        <div className="fixed inset-0 bg-gray-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+            {/* Header */}
+            <div className="px-8 py-6 border-b border-gray-100 flex justify-between items-center shrink-0">
+              <div className="flex items-center space-x-3">
+                <div className="w-9 h-9 bg-emerald-100 rounded-xl flex items-center justify-center">
+                  <FileSpreadsheet className="w-5 h-5 text-emerald-600" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900">Import dari Excel</h3>
+                  <p className="text-xs text-gray-400">Format: .xlsx atau .csv</p>
+                </div>
+              </div>
+              <button onClick={() => setIsImportModalOpen(false)} className="text-gray-400 hover:text-black transition-colors rounded-full p-1 hover:bg-gray-100">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto flex-1 p-8 space-y-6">
+              {/* Drop zone */}
+              {importPreview.length === 0 && (
+                <div
+                  onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+                  onDragLeave={() => setIsDragOver(false)}
+                  onDrop={(e) => {
+                    e.preventDefault(); setIsDragOver(false);
+                    const file = e.dataTransfer.files[0];
+                    if (file) handleFileChange(file);
+                  }}
+                  onClick={() => fileInputRef.current?.click()}
+                  className={`border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all ${
+                    isDragOver
+                      ? 'border-black bg-gray-50 scale-[1.01]'
+                      : 'border-gray-200 hover:border-gray-400 hover:bg-gray-50'
+                  }`}
+                >
+                  <Upload className="w-10 h-10 text-gray-300 mx-auto mb-4" />
+                  <p className="text-sm font-medium text-gray-600">Drag & drop file Excel di sini</p>
+                  <p className="text-xs text-gray-400 mt-1">atau klik untuk memilih file</p>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".xlsx,.xls,.csv"
+                    className="hidden"
+                    onChange={(e) => handleFileChange(e.target.files[0])}
+                  />
+                </div>
+              )}
+
+              {/* Error */}
+              {importError && (
+                <div className="flex items-center space-x-3 bg-red-50 border border-red-200 rounded-xl p-4">
+                  <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
+                  <p className="text-sm text-red-700">{importError}</p>
+                </div>
+              )}
+
+              {/* Preview table */}
+              {importPreview.length > 0 && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium text-gray-700">
+                      Preview: <span className="text-black">{importPreview.length} baris</span>
+                      {importPreview.filter(r => r.errors.length > 0).length > 0 && (
+                        <span className="ml-2 text-red-500">({importPreview.filter(r => r.errors.length > 0).length} error)</span>
+                      )}
+                    </p>
+                    <button
+                      onClick={() => { setImportPreview([]); setImportError(''); if (fileInputRef.current) fileInputRef.current.value = ''; }}
+                      className="text-xs text-gray-400 hover:text-gray-600 underline"
+                    >Ganti file</button>
+                  </div>
+                  <div className="overflow-x-auto rounded-xl border border-gray-100">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase">Baris</th>
+                          <th className="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase">Nama Kegiatan</th>
+                          <th className="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase">Tanggal</th>
+                          <th className="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase">Kategori</th>
+                          <th className="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase">PIC</th>
+                          <th className="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase">No WA</th>
+                          <th className="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {importPreview.map((row) => (
+                          <tr key={row.rowNum} className={row.errors.length > 0 ? 'bg-red-50' : 'hover:bg-gray-50'}>
+                            <td className="px-3 py-2.5 text-gray-400 text-xs">{row.rowNum}</td>
+                            <td className="px-3 py-2.5 font-medium text-gray-900 max-w-[150px] truncate">{row.title || <span className="text-red-400">—</span>}</td>
+                            <td className="px-3 py-2.5 text-gray-600 whitespace-nowrap">{row.date || <span className="text-red-400">—</span>}</td>
+                            <td className="px-3 py-2.5">
+                              {(() => { const c = CATEGORIES.find(c => c.id === row.category); return c ? <span className={`text-xs ${c.text}`}>{c.name}</span> : <span className="text-red-400 text-xs">{row.category || '—'}</span>; })()}
+                            </td>
+                            <td className="px-3 py-2.5 text-gray-600">{row.picName || <span className="text-red-400">—</span>}</td>
+                            <td className="px-3 py-2.5 text-gray-600">{row.picPhone || <span className="text-red-400">—</span>}</td>
+                            <td className="px-3 py-2.5">
+                              {row.errors.length === 0
+                                ? <span className="text-xs text-emerald-600 font-medium">✓ Valid</span>
+                                : <span className="text-xs text-red-500" title={row.errors.join(', ')}>✗ {row.errors[0]}</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Download template */}
+              <div className="flex items-center justify-between py-4 border-t border-gray-50">
+                <div>
+                  <p className="text-xs font-medium text-gray-500">Belum punya template?</p>
+                  <p className="text-xs text-gray-400">Download template Excel dengan format yang sudah benar.</p>
+                </div>
+                <button
+                  onClick={downloadTemplate}
+                  className="flex items-center space-x-2 border border-gray-200 hover:border-gray-400 px-4 py-2 rounded-full text-sm text-gray-600 hover:text-black transition-colors"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Download Template</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Footer */}
+            {importPreview.length > 0 && (
+              <div className="px-8 py-5 border-t border-gray-100 flex justify-between items-center shrink-0">
+                <p className="text-sm text-gray-500">
+                  <span className="font-medium text-emerald-600">{importPreview.filter(r => r.errors.length === 0).length} valid</span>
+                  {importPreview.filter(r => r.errors.length > 0).length > 0 && (
+                    <span className="ml-2 text-red-500">{importPreview.filter(r => r.errors.length > 0).length} error (akan dilewati)</span>
+                  )}
+                </p>
+                <div className="flex space-x-3">
+                  <button onClick={() => setIsImportModalOpen(false)} className="px-6 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-full transition-colors">Batal</button>
+                  <button
+                    onClick={handleImportSubmit}
+                    disabled={isImporting || importPreview.filter(r => r.errors.length === 0).length === 0}
+                    className="flex items-center space-x-2 px-6 py-2.5 bg-black hover:bg-gray-800 disabled:bg-gray-300 text-white text-sm font-medium rounded-full transition-colors shadow-sm"
+                  >
+                    {isImporting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                    <span>{isImporting ? 'Mengimpor...' : `Import ${importPreview.filter(r => r.errors.length === 0).length} Event`}</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ─── Modal Tambah Event Rutin ─── */}
+      {isRecurringModalOpen && (
+        <div className="fixed inset-0 bg-gray-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="px-8 py-6 border-b border-gray-100 flex justify-between items-center">
+              <div className="flex items-center space-x-3">
+                <div className="w-9 h-9 bg-violet-100 rounded-xl flex items-center justify-center">
+                  <Repeat className="w-5 h-5 text-violet-600" />
+                </div>
+                <h3 className="text-lg font-semibold text-gray-900">Tambah Event Rutin</h3>
+              </div>
+              <button onClick={() => setIsRecurringModalOpen(false)} className="text-gray-400 hover:text-black transition-colors rounded-full p-1 hover:bg-gray-100">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleAddRecurring} className="p-8 space-y-6">
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Nama Kegiatan</label>
+                  <input required type="text" value={recurringForm.title} onChange={e => setRecurringForm({ ...recurringForm, title: e.target.value })}
+                    className="w-full px-0 py-2 border-0 border-b-2 border-gray-200 focus:border-black bg-transparent outline-none transition-colors text-gray-900 placeholder-gray-300"
+                    placeholder="Contoh: Rekonsiliasi Keuangan Bulanan" />
+                </div>
+                <div className="grid grid-cols-2 gap-6">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Tanggal Setiap Bulan</label>
+                    <div className="flex items-center space-x-2 border-b-2 border-gray-200 focus-within:border-black transition-colors py-2">
+                      <input
+                        required type="number" min="1" max="31"
+                        value={recurringForm.day_of_month}
+                        onChange={e => setRecurringForm({ ...recurringForm, day_of_month: parseInt(e.target.value) || 1 })}
+                        className="w-16 bg-transparent outline-none text-gray-900 text-2xl font-light"
+                      />
+                      <span className="text-sm text-gray-400">setiap bulan</span>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">Jika bulan pendek, otomatis pakai hari terakhir.</p>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Kategori</label>
+                    <select value={recurringForm.category} onChange={e => setRecurringForm({ ...recurringForm, category: e.target.value })}
+                      className="w-full px-0 py-2 border-0 border-b-2 border-gray-200 focus:border-black bg-transparent outline-none transition-colors text-gray-900 cursor-pointer">
+                      {CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-4">
+                <h4 className="text-sm font-semibold text-gray-900 mb-4">Informasi PIC</h4>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Nama PIC</label>
+                    <input required type="text" value={recurringForm.picName} onChange={e => setRecurringForm({ ...recurringForm, picName: e.target.value })}
+                      className="w-full px-0 py-2 border-0 border-b-2 border-gray-200 focus:border-black bg-transparent outline-none transition-colors text-gray-900 placeholder-gray-300"
+                      placeholder="Contoh: Siti Rahayu" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Nomor WhatsApp</label>
+                    <input required type="tel" value={recurringForm.picPhone} onChange={e => setRecurringForm({ ...recurringForm, picPhone: e.target.value })}
+                      className="w-full px-0 py-2 border-0 border-b-2 border-gray-200 focus:border-black bg-transparent outline-none transition-colors text-gray-900 placeholder-gray-300"
+                      placeholder="Contoh: 08123456789" />
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-8 flex justify-end space-x-3">
+                <button type="button" onClick={() => setIsRecurringModalOpen(false)} className="px-6 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-full transition-colors">Batal</button>
+                <button type="submit" className="px-6 py-2.5 bg-black hover:bg-gray-800 text-white text-sm font-medium rounded-full transition-colors shadow-sm">Simpan Template</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Modal Import Excel Rutin ─── */}
+      {isImportRecurringOpen && (
+        <div className="fixed inset-0 bg-gray-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+            {/* Header */}
+            <div className="px-8 py-6 border-b border-gray-100 flex justify-between items-center shrink-0">
+              <div className="flex items-center space-x-3">
+                <div className="w-9 h-9 bg-violet-100 rounded-xl flex items-center justify-center">
+                  <FileSpreadsheet className="w-5 h-5 text-violet-600" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900">Import Template Rutin dari Excel</h3>
+                  <p className="text-xs text-gray-400">Format: .xlsx atau .csv</p>
+                </div>
+              </div>
+              <button onClick={() => setIsImportRecurringOpen(false)} className="text-gray-400 hover:text-black transition-colors rounded-full p-1 hover:bg-gray-100">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto flex-1 p-8 space-y-6">
+              {/* Drop zone */}
+              {importRecurringPreview.length === 0 && (
+                <div
+                  onDragOver={(e) => { e.preventDefault(); setIsDragOverRecurring(true); }}
+                  onDragLeave={() => setIsDragOverRecurring(false)}
+                  onDrop={(e) => {
+                    e.preventDefault(); setIsDragOverRecurring(false);
+                    const file = e.dataTransfer.files[0];
+                    if (file) handleRecurringFileChange(file);
+                  }}
+                  onClick={() => fileInputRecurringRef.current?.click()}
+                  className={`border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all ${
+                    isDragOverRecurring
+                      ? 'border-violet-500 bg-violet-50 scale-[1.01]'
+                      : 'border-gray-200 hover:border-violet-300 hover:bg-violet-50/30'
+                  }`}
+                >
+                  <Upload className="w-10 h-10 text-gray-300 mx-auto mb-4" />
+                  <p className="text-sm font-medium text-gray-600">Drag & drop file Excel di sini</p>
+                  <p className="text-xs text-gray-400 mt-1">atau klik untuk memilih file</p>
+                  <input
+                    ref={fileInputRecurringRef}
+                    type="file"
+                    accept=".xlsx,.xls,.csv"
+                    className="hidden"
+                    onChange={(e) => handleRecurringFileChange(e.target.files[0])}
+                  />
+                </div>
+              )}
+
+              {/* Error */}
+              {importRecurringError && (
+                <div className="flex items-center space-x-3 bg-red-50 border border-red-200 rounded-xl p-4">
+                  <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
+                  <p className="text-sm text-red-700">{importRecurringError}</p>
+                </div>
+              )}
+
+              {/* Preview table */}
+              {importRecurringPreview.length > 0 && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium text-gray-700">
+                      Preview: <span className="text-black">{importRecurringPreview.length} baris</span>
+                      {importRecurringPreview.filter(r => r.errors.length > 0).length > 0 && (
+                        <span className="ml-2 text-red-500">({importRecurringPreview.filter(r => r.errors.length > 0).length} error)</span>
+                      )}
+                    </p>
+                    <button
+                      onClick={() => { setImportRecurringPreview([]); setImportRecurringError(''); if (fileInputRecurringRef.current) fileInputRecurringRef.current.value = ''; }}
+                      className="text-xs text-gray-400 hover:text-gray-600 underline"
+                    >Ganti file</button>
+                  </div>
+                  <div className="overflow-x-auto rounded-xl border border-gray-100">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase">Baris</th>
+                          <th className="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase">Nama Kegiatan</th>
+                          <th className="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase">Tgl/Bln</th>
+                          <th className="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase">Kategori</th>
+                          <th className="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase">PIC</th>
+                          <th className="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase">No WA</th>
+                          <th className="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {importRecurringPreview.map((row) => (
+                          <tr key={row.rowNum} className={row.errors.length > 0 ? 'bg-red-50' : 'hover:bg-gray-50'}>
+                            <td className="px-3 py-2.5 text-gray-400 text-xs">{row.rowNum}</td>
+                            <td className="px-3 py-2.5 font-medium text-gray-900 max-w-[150px] truncate">{row.title || <span className="text-red-400">—</span>}</td>
+                            <td className="px-3 py-2.5 text-gray-600 font-semibold">
+                              {row.day_of_month ? `Tgl ${row.day_of_month}` : <span className="text-red-400">—</span>}
+                            </td>
+                            <td className="px-3 py-2.5">
+                              {(() => { const c = CATEGORIES.find(c => c.id === row.category); return c ? <span className={`text-xs ${c.text}`}>{c.name}</span> : <span className="text-red-400 text-xs">{row.category || '—'}</span>; })()}
+                            </td>
+                            <td className="px-3 py-2.5 text-gray-600">{row.picName || <span className="text-red-400">—</span>}</td>
+                            <td className="px-3 py-2.5 text-gray-600">{row.picPhone || <span className="text-red-400">—</span>}</td>
+                            <td className="px-3 py-2.5">
+                              {row.errors.length === 0
+                                ? <span className="text-xs text-emerald-600 font-medium">✓ Valid</span>
+                                : <span className="text-xs text-red-500" title={row.errors.join(', ')}>✗ {row.errors[0]}</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Format info + Download template */}
+              <div className="flex items-center justify-between py-4 border-t border-gray-50">
+                <div>
+                  <p className="text-xs font-medium text-gray-500">Format kolom Excel:</p>
+                  <p className="text-xs text-gray-400 font-mono mt-0.5">Nama Kegiatan | Tanggal (1-31) | Kategori | Nama PIC | No WA PIC</p>
+                </div>
+                <button
+                  onClick={downloadRecurringTemplate}
+                  className="flex items-center space-x-2 border border-gray-200 hover:border-violet-300 hover:text-violet-700 px-4 py-2 rounded-full text-sm text-gray-600 transition-colors shrink-0 ml-4"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Download Template</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Footer */}
+            {importRecurringPreview.length > 0 && (
+              <div className="px-8 py-5 border-t border-gray-100 flex justify-between items-center shrink-0">
+                <p className="text-sm text-gray-500">
+                  <span className="font-medium text-emerald-600">{importRecurringPreview.filter(r => r.errors.length === 0).length} valid</span>
+                  {importRecurringPreview.filter(r => r.errors.length > 0).length > 0 && (
+                    <span className="ml-2 text-red-500">{importRecurringPreview.filter(r => r.errors.length > 0).length} error (akan dilewati)</span>
+                  )}
+                </p>
+                <div className="flex space-x-3">
+                  <button onClick={() => setIsImportRecurringOpen(false)} className="px-6 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-full transition-colors">Batal</button>
+                  <button
+                    onClick={handleImportRecurringSubmit}
+                    disabled={isImportingRecurring || importRecurringPreview.filter(r => r.errors.length === 0).length === 0}
+                    className="flex items-center space-x-2 px-6 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:bg-gray-300 text-white text-sm font-medium rounded-full transition-colors shadow-sm"
+                  >
+                    {isImportingRecurring ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                    <span>{isImportingRecurring ? 'Mengimpor...' : `Import ${importRecurringPreview.filter(r => r.errors.length === 0).length} Template`}</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      {/* ─── Modal Upload Bukti ─── */}
+      {isUploadModalOpen && selectedUploadEvent && (
+        <div className="fixed inset-0 bg-gray-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="px-6 py-5 border-b border-gray-100 flex justify-between items-center">
+              <h3 className="text-lg font-bold text-gray-900">Upload Bukti Tindak Lanjut</h3>
+              <button onClick={() => { setIsUploadModalOpen(false); setUploadFile(null); }} className="text-gray-400 hover:text-black">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleUploadEvidence} className="p-6 space-y-6">
+              <div>
+                <p className="text-sm font-medium text-gray-700 mb-1">Kegiatan:</p>
+                <p className="text-sm text-gray-500 bg-gray-50 p-3 rounded-xl border border-gray-100">{selectedUploadEvent.title}</p>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Pilih File (Gambar/PDF)</label>
+                <div className="flex items-center justify-center w-full">
+                  <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-gray-300 rounded-xl cursor-pointer bg-gray-50 hover:bg-gray-100 hover:border-blue-400 transition-all">
+                    <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                      <Upload className="w-8 h-8 mb-3 text-gray-400" />
+                      <p className="text-sm text-gray-500">
+                        {uploadFile ? (
+                          <span className="font-semibold text-blue-600">{uploadFile.name}</span>
+                        ) : (
+                          <><span className="font-semibold">Klik untuk upload</span> atau drag and drop</>
+                        )}
+                      </p>
+                      {!uploadFile && <p className="text-xs text-gray-400 mt-1">PNG, JPG, PDF (Max. 5MB)</p>}
+                    </div>
+                    <input type="file" className="hidden" accept=".png,.jpg,.jpeg,.pdf" onChange={(e) => setUploadFile(e.target.files[0])} />
+                  </label>
+                </div>
+              </div>
+
+              <div className="pt-2 flex justify-end space-x-3">
+                <button type="button" onClick={() => { setIsUploadModalOpen(false); setUploadFile(null); }} className="px-5 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-full">Batal</button>
+                <button type="submit" disabled={!uploadFile || isUploading} className="px-5 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white text-sm font-medium rounded-full shadow-sm flex items-center">
+                  {isUploading ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Upload className="w-4 h-4 mr-2" />}
+                  {isUploading ? 'Mengunggah...' : 'Simpan Bukti'}
+                </button>
               </div>
             </form>
           </div>

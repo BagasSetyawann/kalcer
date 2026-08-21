@@ -1,4 +1,4 @@
-# KalRemind 📅
+# KALCER 📅 — Kalender Cerdas Reminder
 
 Aplikasi pengingat kegiatan berbasis WhatsApp untuk instansi/organisasi.  
 Dibangun dengan **React (Vite)** + **Supabase** + **Fonnte Gateway**.
@@ -32,11 +32,13 @@ Dibangun dengan **React (Vite)** + **Supabase** + **Fonnte Gateway**.
 ### Langkah 1: Setup Database Supabase
 
 1. Buka [supabase.com](https://supabase.com) → **New Project**
-2. Isi nama project: `kalremind`, isi password database, pilih region terdekat
+2. Isi nama project: `kalcer`, isi password database, pilih region terdekat
 3. Tunggu project selesai dibuat (~1-2 menit)
 4. Buka **SQL Editor** → **New Query**
 5. Copy-paste isi file [`supabase/migrations/001_initial_schema.sql`](./supabase/migrations/001_initial_schema.sql) ke editor
 6. Klik **Run** → pastikan tidak ada error
+7. Ulangi untuk [`supabase/migrations/002_enable_auth_rls.sql`](./supabase/migrations/002_enable_auth_rls.sql)
+8. Ulangi untuk [`supabase/migrations/003_recurring_events.sql`](./supabase/migrations/003_recurring_events.sql)
 
 ### Langkah 2: Catat Kredensial Supabase
 
@@ -152,6 +154,16 @@ Buka browser di `http://localhost:5173`
 2. Isi Nama Kegiatan, Tanggal, Kategori, Nama PIC, dan Nomor WA PIC
 3. Klik **"Simpan Jadwal"**
 
+### Import via Excel
+1. Klik tombol **"Import Excel"** di header
+2. Download template Excel, isi data, lalu upload kembali
+3. Review preview dan klik **"Import"**
+
+### Event Rutin Bulanan
+1. Buka tab **"Rutin"**
+2. Klik **"Tambah Rutin"** → isi template (tanggal setiap bulan, kategori, PIC)
+3. Di awal bulan, klik **"Generate Bulan Ini"** untuk membuat jadwal otomatis
+
 ### Mengisi Token Fonnte
 1. Buka tab **Pengaturan**
 2. Paste token API Fonnte Anda
@@ -159,8 +171,7 @@ Buka browser di `http://localhost:5173`
 
 ### Mengirim Pengingat WA
 - **Per jadwal**: Klik ikon lonceng 🔔 atau tombol **"Kirim WA"** di tab Schedules
-- **Massal (H-1)**: Buka tab **Blasting** → klik **"BLASTING H-1 SEKARANG"**  
-  (hanya akan mengirim ke jadwal yang besok dan masih berstatus `pending`)
+- **Massal**: Buka tab **Blasting** → klik tombol H-1, H-2, H-3, atau H-7
 
 ### Konfirmasi Otomatis
 Jika Webhook Fonnte sudah dikonfigurasi, ketika PIC membalas pesan dengan kata **"OK"**, **"Siap"**, **"Baik"**, dll — status jadwal akan otomatis berubah menjadi **Terkonfirmasi** di database (real-time).
@@ -170,9 +181,11 @@ Jika Webhook Fonnte sudah dikonfigurasi, ketika PIC membalas pesan dengan kata *
 ## Struktur Folder
 
 ```
-kalremind/
+kalcer/
 ├── src/
 │   ├── App.jsx              # Komponen React utama
+│   ├── components/
+│   │   └── LoginPage.jsx    # Halaman login
 │   └── lib/
 │       └── supabase.js      # Konfigurasi Supabase client
 ├── supabase/
@@ -181,7 +194,9 @@ kalremind/
 │   │   ├── blast/           # Edge Function: Kirim WA via Fonnte
 │   │   └── receive-reply/   # Edge Function: Webhook balasan Fonnte
 │   └── migrations/
-│       └── 001_initial_schema.sql  # SQL setup database
+│       ├── 001_initial_schema.sql   # SQL setup database
+│       ├── 002_enable_auth_rls.sql  # Auth & RLS
+│       └── 003_recurring_events.sql # Event rutin bulanan
 ├── .env.example             # Template environment variables
 ├── vercel.json              # Konfigurasi deploy Vercel
 └── package.json
@@ -199,3 +214,4 @@ kalremind/
 | Realtime | Supabase Realtime |
 | Gateway WA | Fonnte API |
 | Deploy Frontend | Vercel |
+| Import Data | SheetJS (xlsx) |
