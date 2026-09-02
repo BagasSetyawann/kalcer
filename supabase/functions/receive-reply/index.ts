@@ -38,6 +38,13 @@ serve(async (req: Request) => {
     return new Response("ok", { headers: corsHeaders });
   }
 
+  if (req.method === "GET") {
+    return new Response("Webhook siap menerima data", {
+      status: 200,
+      headers: corsHeaders,
+    });
+  }
+
   if (req.method !== "POST") {
     return new Response("Method tidak diizinkan.", {
       status: 405,
@@ -124,6 +131,13 @@ serve(async (req: Request) => {
       .eq("id", matchedEvent.id);
 
     if (updateError) throw updateError;
+
+    // Catat log aktivitas
+    await supabase.from("activity_logs").insert([{
+      action: "Update Status",
+      entity_title: matchedEvent.title,
+      description: `PIC (${matchedEvent.picName}) mengkonfirmasi via WhatsApp: "${messageBody}"`
+    }]);
 
     console.log(
       `✅ Status kegiatan "${matchedEvent.title}" diubah ke CONFIRMED untuk ${matchedEvent.picName}`

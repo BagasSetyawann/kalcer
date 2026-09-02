@@ -3,7 +3,7 @@ import {
   Calendar as CalendarIcon, Clock, CheckCircle, X, Bell,
   Plus, LayoutGrid, List as ListIcon, Settings, RefreshCw,
   Send, AlertCircle, Zap, Link, ExternalLink, Save, Eye, EyeOff, LogOut,
-  Repeat, Upload, Download, FileSpreadsheet, ToggleLeft, ToggleRight, Trash2
+  Repeat, Upload, Download, FileSpreadsheet, ToggleLeft, ToggleRight, Trash2, Globe
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { supabase, FUNCTIONS_URL } from './lib/supabase.js';
@@ -1270,17 +1270,44 @@ export default function App({ session }) {
                   <span className="font-medium text-gray-500">Project URL</span>
                   <span className="font-mono text-xs text-gray-700 truncate max-w-[280px]">{import.meta.env.VITE_SUPABASE_URL}</span>
                 </div>
-                <div className="flex items-center justify-between py-2">
-                  <span className="font-medium text-gray-500">Webhook URL</span>
-                  <a
-                    href={`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/receive-reply`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="font-mono text-xs text-blue-600 underline inline-flex items-center space-x-1 truncate max-w-[280px]"
-                  >
-                    <Link className="w-3 h-3 shrink-0" />
-                    <span>receive-reply</span>
-                  </a>
+                <div className="flex flex-col py-2">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="font-medium text-gray-500">Webhook URL</span>
+                    <a
+                      href={`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/receive-reply`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-mono text-xs text-blue-600 underline inline-flex items-center space-x-1 truncate max-w-[280px]"
+                    >
+                      <Link className="w-3 h-3 shrink-0" />
+                      <span>receive-reply</span>
+                    </a>
+                  </div>
+                  <div className="mt-4 p-4 bg-gray-50 rounded-xl border border-gray-100">
+                    <button 
+                      onClick={async () => {
+                        try {
+                          const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/receive-reply`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ sender: "0812345678", message: "ok" })
+                          });
+                          const data = await res.json();
+                          alert("Test Webhook Berhasil Terkirim ke Server! Silakan cek Logs Edge Function di Supabase. Response: " + JSON.stringify(data));
+                        } catch (err) {
+                          alert("Test Webhook Gagal: " + err.message);
+                        }
+                      }}
+                      className="w-full px-4 py-2 bg-indigo-50 text-indigo-600 rounded-lg text-sm font-medium hover:bg-indigo-100 transition-all active:scale-95 flex items-center justify-center space-x-2"
+                    >
+                      <Globe className="w-4 h-4" />
+                      <span>Kirim Test Webhook</span>
+                    </button>
+                    <p className="text-xs text-gray-500 mt-3 text-center leading-relaxed">
+                      Tombol ini akan mengirim sinyal palsu ke server Supabase Anda.<br/>
+                      Jika berhasil, maka webhook <strong>sudah berjalan 100%</strong>. Jika dari HP tetap tidak bisa, berarti masalah ada pada koneksi perangkat Fonnte.
+                    </p>
+                  </div>
                 </div>
               </div>
             </div>

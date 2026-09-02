@@ -81,9 +81,10 @@ async function sendViaFonnte(
     });
   } catch (networkErr) {
     console.error("[Fonnte] Network error:", networkErr);
+    const errorMessage = networkErr instanceof Error ? networkErr.message : String(networkErr);
     return {
       success: false,
-      message: `Gagal terhubung ke Fonnte API: ${networkErr.message}`,
+      message: `Gagal terhubung ke Fonnte API: ${errorMessage}`,
     };
   }
 
@@ -262,10 +263,10 @@ serve(async (req: Request) => {
           ...result,
         });
 
-        // Jeda 60 detik (1 menit) antar pesan untuk menghindari deteksi bot WhatsApp
+        // Jeda 3 menit antar pesan untuk menghindari deteksi spam WhatsApp
         if (targetEvents.indexOf(event) < targetEvents.length - 1) {
-          console.log(`[Blast H-${daysAhead}] Menunggu 60 detik sebelum pesan berikutnya...`);
-          await new Promise((resolve) => setTimeout(resolve, 60000));
+          console.log(`[Blast H-${daysAhead}] Menunggu 3 menit (180 detik) sebelum pesan berikutnya...`);
+          await new Promise((resolve) => setTimeout(resolve, 180000));
         }
       }
 
