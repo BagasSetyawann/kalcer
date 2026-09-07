@@ -561,7 +561,13 @@ export default function App({ session }) {
   const prevMonth = () => setCalMonth(({ year, month }) => month === 0 ? { year: year - 1, month: 11 } : { year, month: month - 1 });
   const nextMonth = () => setCalMonth(({ year, month }) => month === 11 ? { year: year + 1, month: 0 } : { year, month: month + 1 });
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = (() => {
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  })();
 
   // ============================================================
   // RENDER HELPERS
@@ -1060,9 +1066,12 @@ export default function App({ session }) {
                 const targetDate = (() => {
                   const d = new Date();
                   d.setDate(d.getDate() + option.days);
-                  return d.toISOString().split('T')[0];
+                  const year = d.getFullYear();
+                  const month = String(d.getMonth() + 1).padStart(2, '0');
+                  const day = String(d.getDate()).padStart(2, '0');
+                  return `${year}-${month}-${day}`;
                 })();
-                const pendingEvents = events.filter(e => e.date === targetDate && e.status === 'pending');
+                const pendingEvents = events.filter(e => e.date === targetDate && (e.status === 'pending' || e.status === 'reminded'));
                 const isThisLoading = isLoading === option.key;
 
                 const colorMap = {

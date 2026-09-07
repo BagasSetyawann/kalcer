@@ -221,7 +221,7 @@ serve(async (req: Request) => {
         .from("events")
         .select("*")
         .eq("date", targetDateStr)
-        .eq("status", "pending");
+        .in("status", ["pending", "reminded"]);
 
       if (fetchError) throw fetchError;
 
